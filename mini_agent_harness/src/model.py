@@ -27,9 +27,8 @@ class MockLLM(LLM):
 class LLM(ABC):
 
     @abstractmethod
-    async def generate(self, message: Message) -> LLMResponse:
+    async def generate(self, message: list[Message]) -> LLMResponse:
         pass
-
 
 
 class Tool(ABC):
@@ -39,6 +38,11 @@ class Tool(ABC):
     def name(self) -> str:
         pass
 
+    @property
+    @abstractmethod
+    def description(self) -> str:
+        pass
+    
     @abstractmethod
     async def execute(self, arguments: dict[str, Any]) -> str:
         pass
