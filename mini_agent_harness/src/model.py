@@ -19,7 +19,6 @@ class LLMResponse(BaseModel):
     tool_call: ToolCall | None = None
 
 """
-
 class MockLLM(LLM):
     def generate(self, messages: list[Message]) -> LLMResponse:
         ...
@@ -28,7 +27,7 @@ class MockLLM(LLM):
 class LLM(ABC):
 
     @abstractmethod
-    def generate(self, message: Message) -> LLMResponse:
+    async def generate(self, message: Message) -> LLMResponse:
         pass
 
 
@@ -43,5 +42,4 @@ class Tool(ABC):
     @abstractmethod
     async def execute(self, arguments: dict[str, Any]) -> str:
         pass
-x
     

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environment
+.venv/
+
+# Python version manager
+.python-version
+
+# uv
+uv.lock
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# IDE / editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
