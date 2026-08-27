@@ -17,6 +17,15 @@ class LLMResponse(BaseModel):
     type: Literal["tool_call", "final"]
     content: Message
     tool_call: ToolCall | None = None
+    tokens_used: int = 0  #mock count 
+
+RunStatus = Literal["completed", "max_iterations_exceeded", "budget_exceeded"]
+
+class RunResult(BaseModel):
+    status: RunStatus
+    output: str | None = None
+    iterations_used: int = 0
+    tokens_used: int = 0
 
 """
 class MockLLM(LLM):

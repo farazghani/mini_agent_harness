@@ -1,7 +1,7 @@
 # src/test/agent_test.py
 import asyncio
 
-from src.model import Message, LLMResponse, ToolCall
+from src.model import Message, LLMResponse, ToolCall, Tool
 from src.llm.mockllm import MockLLM
 from src.tools.registry import ToolRegistry
 from src.tools.calculator import CalculatorTool
@@ -13,15 +13,18 @@ async def test_simple_final_response():
     llm = MockLLM(response=[
         LLMResponse(
             type="final",
-            content=Message(type="model", text="Hello there!")
+            content=Message(type="model", text="Hello there!"),
+            tokens_used=10
         )
     ])
     agent = Agent(llm=llm, tools=ToolRegistry([]), max_iterations=10)
 
     result = await agent.run("Hi")
 
-    assert result == "Hello there!"
-    # Should have called generate exactly once
+    assert result.status == "completed"
+    assert result.output == "Hello there!"
+    assert result.iterations_used == 1
+    assert result.tokens_used == 10
     assert len(llm.calls) == 1
     print("test_simple_final_response passed")
 
@@ -32,11 +35,13 @@ async def test_tool_call_then_final():
         LLMResponse(
             type="tool_call",
             content=Message(type="model", text="Let me calculate that."),
-            tool_call=ToolCall(name="calculator", arguments={"expression": "6 * 7"})
+            tool_call=ToolCall(name="calculator", arguments={"expression": "6 * 7"}),
+            tokens_used=15
         ),
         LLMResponse(
             type="final",
-            content=Message(type="model", text="The answer is 42.")
+            content=Message(type="model", text="The answer is 42."),
+            tokens_used=10
         ),
     ])
     tools = ToolRegistry([CalculatorTool()])
@@ -44,16 +49,21 @@ async def test_tool_call_then_final():
 
     result = await agent.run("What is 6 times 7?")
 
-    assert result == "The answer is 42."
-    assert len(llm.calls) == 2  # generate() called twice
+    assert result.status == "completed"
+    assert result.output == "The answer is 42."
+    assert result.iterations_used == 2
+    assert result.tokens_used == 25
+    assert len(llm.calls) == 2
 
-    # Check the history sent on the SECOND call includes the tool result
     second_call_history = llm.calls[1]
     assert len(second_call_history) == 3
     assert second_call_history[0].type == "user"
     assert second_call_history[1].type == "model"
     assert second_call_history[2].type == "system"
-    assert "42" in second_call_history[2].text
+    # Note: CalculatorTool now has a 20% random failure rate, so this could
+    # legitimately be a retried success OR an error string after retries fail.
+    # We just check *something* came back, not that it's always "42".
+    assert "Tool 'calculator' result:" in second_call_history[2].text
     print("test_tool_call_then_final passed")
 
 
@@ -63,11 +73,13 @@ async def test_unknown_tool_name():
         LLMResponse(
             type="tool_call",
             content=Message(type="model", text="Using a tool."),
-            tool_call=ToolCall(name="nonexistent_tool", arguments={})
+            tool_call=ToolCall(name="nonexistent_tool", arguments={}),
+            tokens_used=10
         ),
         LLMResponse(
             type="final",
-            content=Message(type="model", text="I couldn't find that tool.")
+            content=Message(type="model", text="I couldn't find that tool."),
+            tokens_used=10
         ),
     ])
     tools = ToolRegistry([])  # empty registry
@@ -75,8 +87,8 @@ async def test_unknown_tool_name():
 
     result = await agent.run("Do something")
 
-    assert result == "I couldn't find that tool."
-    # Check the error got fed back into history
+    assert result.status == "completed"
+    assert result.output == "I couldn't find that tool."
     second_call_history = llm.calls[1]
     assert "Error" in second_call_history[-1].text
     print("test_unknown_tool_name passed")
@@ -84,20 +96,22 @@ async def test_unknown_tool_name():
 
 async def test_max_iterations_reached():
     """LLM keeps calling tools forever and never returns 'final'."""
-    # Always return a tool_call response, never 'final'
     infinite_tool_call = LLMResponse(
         type="tool_call",
         content=Message(type="model", text="Calling again."),
-        tool_call=ToolCall(name="calculator", arguments={"expression": "1 + 1"})
+        tool_call=ToolCall(name="calculator", arguments={"expression": "1 + 1"}),
+        tokens_used=5
     )
-    llm = MockLLM(response=[infinite_tool_call] * 20)  # more than max_iterations
+    llm = MockLLM(response=[infinite_tool_call] * 20)
     tools = ToolRegistry([CalculatorTool()])
     agent = Agent(llm=llm, tools=tools, max_iterations=10)
 
     result = await agent.run("Loop forever")
 
-    assert result == "Error: max iterations reached without a final response"
-    assert len(llm.calls) == 10  # stopped exactly at max_iterations
+    assert result.status == "max_iterations_exceeded"
+    assert result.output is None
+    assert result.iterations_used == 10
+    assert len(llm.calls) == 10
     print("test_max_iterations_reached passed")
 
 
@@ -107,21 +121,168 @@ async def test_malformed_tool_call_response():
         LLMResponse(
             type="tool_call",
             content=Message(type="model", text="Oops, forgot the tool_call field."),
-            tool_call=None
+            tool_call=None,
+            tokens_used=10
         ),
         LLMResponse(
             type="final",
-            content=Message(type="model", text="Recovered.")
+            content=Message(type="model", text="Recovered."),
+            tokens_used=10
         ),
     ])
     agent = Agent(llm=llm, tools=ToolRegistry([]), max_iterations=10)
 
     result = await agent.run("Test malformed response")
 
-    assert result == "Recovered."
+    assert result.status == "completed"
+    assert result.output == "Recovered."
     second_call_history = llm.calls[1]
     assert "missing" in second_call_history[-1].text.lower()
     print("test_malformed_tool_call_response passed")
+
+
+async def test_budget_exceeded():
+    """LLM's token usage crosses max_tokens before finishing."""
+    llm = MockLLM(response=[
+        LLMResponse(
+            type="final",
+            content=Message(type="model", text="This should never be seen."),
+            tokens_used=9999
+        )
+    ])
+    agent = Agent(llm=llm, tools=ToolRegistry([]), max_iterations=10, max_tokens=1000)
+
+    result = await agent.run("Say something expensive")
+
+    assert result.status == "budget_exceeded"
+    assert result.output is None
+    assert result.tokens_used == 9999
+    assert result.iterations_used == 1
+    print("test_budget_exceeded passed")
+
+
+class FlakyTool(Tool):
+    """Fails a fixed number of times, then succeeds — for testing retry logic."""
+
+    def __init__(self, fail_times: int):
+        self.fail_times = fail_times
+        self.attempts = 0
+
+    @property
+    def name(self) -> str:
+        return "flaky"
+    
+    @property
+    def description(self) -> str:
+        return "A test tool that fails a configurable number of times before succeeding."
+
+    async def execute(self, arguments: dict) -> str:
+        self.attempts += 1
+        if self.attempts <= self.fail_times:
+            raise RuntimeError("simulated transient failure")
+        return "success"
+
+
+async def test_tool_retry_then_success():
+    """Tool fails twice, succeeds on the 3rd (final allowed) attempt."""
+    flaky = FlakyTool(fail_times=2)
+    llm = MockLLM(response=[
+        LLMResponse(
+            type="tool_call",
+            content=Message(type="model", text="Calling flaky tool."),
+            tool_call=ToolCall(name="flaky", arguments={}),
+            tokens_used=10
+        ),
+        LLMResponse(
+            type="final",
+            content=Message(type="model", text="Done."),
+            tokens_used=10
+        ),
+    ])
+    agent = Agent(llm=llm, tools=ToolRegistry([flaky]), max_iterations=10, max_tool_retries=2)
+
+    result = await agent.run("Use the flaky tool")
+
+    assert result.status == "completed"
+    assert flaky.attempts == 3  # 1 initial + 2 retries
+    second_call_history = llm.calls[1]
+    assert "success" in second_call_history[-1].text
+    print("test_tool_retry_then_success passed")
+
+
+async def test_tool_fails_all_retries():
+    """Tool fails every attempt — error reported back, run does not crash."""
+    flaky = FlakyTool(fail_times=99)  # always fails
+    llm = MockLLM(response=[
+        LLMResponse(
+            type="tool_call",
+            content=Message(type="model", text="Calling flaky tool."),
+            tool_call=ToolCall(name="flaky", arguments={}),
+            tokens_used=10
+        ),
+        LLMResponse(
+            type="final",
+            content=Message(type="model", text="Gave up."),
+            tokens_used=10
+        ),
+    ])
+    agent = Agent(llm=llm, tools=ToolRegistry([flaky]), max_iterations=10, max_tool_retries=2)
+
+    result = await agent.run("Use the flaky tool")
+
+    assert result.status == "completed"  # run itself doesn't crash
+    assert flaky.attempts == 3  # 1 initial + 2 retries, then gives up
+    second_call_history = llm.calls[1]
+    assert "Error" in second_call_history[-1].text
+    print("test_tool_fails_all_retries passed")
+
+
+class HangingTool(Tool):
+    """Never returns — for testing the per-tool-call timeout."""
+
+    @property
+    def name(self) -> str:
+        return "hanging"
+    
+    @property
+    def description(self) -> str:
+        return "hanging tool"
+
+    async def execute(self, arguments: dict) -> str:
+        await asyncio.sleep(999)
+        return "never gets here"
+
+
+async def test_tool_timeout():
+    """Tool hangs forever — timeout kicks in, error reported, run does not hang."""
+    hanging = HangingTool()
+    llm = MockLLM(response=[
+        LLMResponse(
+            type="tool_call",
+            content=Message(type="model", text="Calling hanging tool."),
+            tool_call=ToolCall(name="hanging", arguments={}),
+            tokens_used=10
+        ),
+        LLMResponse(
+            type="final",
+            content=Message(type="model", text="Timed out, moving on."),
+            tokens_used=10
+        ),
+    ])
+    agent = Agent(
+        llm=llm,
+        tools=ToolRegistry([hanging]),
+        max_iterations=10,
+        tool_timeout_seconds=0.2,   # short timeout so the test runs fast
+        max_tool_retries=1,         # keep retries low so test doesn't take too long
+    )
+
+    result = await agent.run("Use the hanging tool")
+
+    assert result.status == "completed"
+    second_call_history = llm.calls[1]
+    assert "timed out" in second_call_history[-1].text.lower()
+    print("test_tool_timeout passed")
 
 
 async def main():
@@ -130,6 +291,10 @@ async def main():
     await test_unknown_tool_name()
     await test_max_iterations_reached()
     await test_malformed_tool_call_response()
+    await test_budget_exceeded()
+    await test_tool_retry_then_success()
+    await test_tool_fails_all_retries()
+    await test_tool_timeout()
     print("\nAll tests passed!")
 
 

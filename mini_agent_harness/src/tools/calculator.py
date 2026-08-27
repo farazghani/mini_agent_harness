@@ -3,6 +3,7 @@ import ast
 import operator
 from typing import Any
 from src.model import Tool
+import random
 
 
 # Only allow these operators — nothing else gets evaluated
@@ -56,6 +57,9 @@ class CalculatorTool(Tool):
         if not expression:
             return "Error: 'expression' argument is required"
 
+        #implementing random failure
+        if random.random() < 0.2:
+            raise RuntimeError("simulated calculator failure")  # transient — worth retrying
         try:
             tree = ast.parse(expression, mode="eval")
             result = _safe_eval(tree.body)
