@@ -17,8 +17,16 @@ class MockLLM(LLM):
         )
        
         
+#for test
+class CrashingMockLLM(MockLLM):
+    """Like MockLLM, but raises instead of silently falling back to a default
+    response once scripted responses run out — used to cleanly simulate a
+    process crash at a specific point in the agent loop."""
 
-        
+    async def generate(self, message: list[Message]) -> LLMResponse:
+        if not self.responses:
+            raise RuntimeError("simulated crash: LLM unavailable")
+        return await super().generate(message)
 
         
         

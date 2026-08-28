@@ -15,7 +15,8 @@ class EventStore:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
-
+    
+    #migration
     def _init_db(self):
         conn = self._connect()
         conn.execute("""
@@ -44,19 +45,21 @@ class EventStore:
         conn.commit()
         conn.close()
 
-    def create_run(self, user_input: str) -> str:
+    #create_run
+    def create_run(self, user_input: str ,  status: str = "queued") -> str:
         run_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         conn = self._connect()
         conn.execute(
             "INSERT INTO runs (id, status, user_input, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (run_id, "running", user_input, now, now),
+            (run_id, status, user_input, now, now),
         )
         conn.commit()
         conn.close()
         self.append_event(run_id, "run_created", {"user_input": user_input})
         return run_id
-
+    
+    #append event
     def append_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
         conn = self._connect()
         seq = conn.execute(
@@ -70,7 +73,8 @@ class EventStore:
                      (datetime.now(timezone.utc).isoformat(), run_id))
         conn.commit()
         conn.close()
-
+        
+    #list of events
     def get_events(self, run_id: str) -> list[dict[str, Any]]:
         conn = self._connect()
         rows = conn.execute(
@@ -117,7 +121,7 @@ class EventStore:
 
     def list_incomplete_runs(self) -> list[str]:
         conn = self._connect()
-        rows = conn.execute("SELECT id FROM runs WHERE status = 'running'").fetchall()
+        rows = conn.execute("SELECT id FROM runs WHERE status IN ('running', 'queued')").fetchall()
         conn.close()
         return [r["id"] for r in rows]
     

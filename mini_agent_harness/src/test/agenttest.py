@@ -1,15 +1,32 @@
 # src/test/agent_test.py
 import asyncio
+import os
+import tempfile
 
 from src.model import Message, LLMResponse, ToolCall, Tool
-from src.llm.mockllm import MockLLM
+from src.llm.mockllm import MockLLM , CrashingMockLLM
 from src.tools.registry import ToolRegistry
 from src.tools.calculator import CalculatorTool
 from src.agent import Agent
+from src.db.store import EventStore
+
+
+def fresh_store() -> tuple[EventStore, str]:
+    """Creates a new temp SQLite file per test so tests don't share state."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)  # EventStore creates the schema itself on first use
+    return EventStore(path), path
+
+
+def cleanup(path: str) -> None:
+    if os.path.exists(path):
+        os.remove(path)
 
 
 async def test_simple_final_response():
     """LLM answers immediately with no tool calls."""
+    store, db_path = fresh_store()
     llm = MockLLM(response=[
         LLMResponse(
             type="final",
@@ -17,20 +34,23 @@ async def test_simple_final_response():
             tokens_used=10
         )
     ])
-    agent = Agent(llm=llm, tools=ToolRegistry([]), max_iterations=10)
+    agent = Agent(llm=llm, tools=ToolRegistry([]), store=store, max_iterations=10)
 
-    result = await agent.run("Hi")
+    result = await agent.start("Hi")
 
     assert result.status == "completed"
     assert result.output == "Hello there!"
     assert result.iterations_used == 1
     assert result.tokens_used == 10
     assert len(llm.calls) == 1
+
+    cleanup(db_path)
     print("test_simple_final_response passed")
 
 
 async def test_tool_call_then_final():
     """LLM calls a tool, sees the result, then gives a final answer."""
+    store, db_path = fresh_store()
     llm = MockLLM(response=[
         LLMResponse(
             type="tool_call",
@@ -45,9 +65,9 @@ async def test_tool_call_then_final():
         ),
     ])
     tools = ToolRegistry([CalculatorTool()])
-    agent = Agent(llm=llm, tools=tools, max_iterations=10)
+    agent = Agent(llm=llm, tools=tools, store=store, max_iterations=10)
 
-    result = await agent.run("What is 6 times 7?")
+    result = await agent.start("What is 6 times 7?")
 
     assert result.status == "completed"
     assert result.output == "The answer is 42."
@@ -60,15 +80,15 @@ async def test_tool_call_then_final():
     assert second_call_history[0].type == "user"
     assert second_call_history[1].type == "model"
     assert second_call_history[2].type == "system"
-    # Note: CalculatorTool now has a 20% random failure rate, so this could
-    # legitimately be a retried success OR an error string after retries fail.
-    # We just check *something* came back, not that it's always "42".
     assert "Tool 'calculator' result:" in second_call_history[2].text
+
+    cleanup(db_path)
     print("test_tool_call_then_final passed")
 
 
 async def test_unknown_tool_name():
     """LLM calls a tool that doesn't exist in the registry."""
+    store, db_path = fresh_store()
     llm = MockLLM(response=[
         LLMResponse(
             type="tool_call",
@@ -82,20 +102,23 @@ async def test_unknown_tool_name():
             tokens_used=10
         ),
     ])
-    tools = ToolRegistry([])  # empty registry
-    agent = Agent(llm=llm, tools=tools, max_iterations=10)
+    tools = ToolRegistry([])
+    agent = Agent(llm=llm, tools=tools, store=store, max_iterations=10)
 
-    result = await agent.run("Do something")
+    result = await agent.start("Do something")
 
     assert result.status == "completed"
     assert result.output == "I couldn't find that tool."
     second_call_history = llm.calls[1]
     assert "Error" in second_call_history[-1].text
+
+    cleanup(db_path)
     print("test_unknown_tool_name passed")
 
 
 async def test_max_iterations_reached():
     """LLM keeps calling tools forever and never returns 'final'."""
+    store, db_path = fresh_store()
     infinite_tool_call = LLMResponse(
         type="tool_call",
         content=Message(type="model", text="Calling again."),
@@ -104,19 +127,22 @@ async def test_max_iterations_reached():
     )
     llm = MockLLM(response=[infinite_tool_call] * 20)
     tools = ToolRegistry([CalculatorTool()])
-    agent = Agent(llm=llm, tools=tools, max_iterations=10)
+    agent = Agent(llm=llm, tools=tools, store=store, max_iterations=10)
 
-    result = await agent.run("Loop forever")
+    result = await agent.start("Loop forever")
 
     assert result.status == "max_iterations_exceeded"
     assert result.output is None
     assert result.iterations_used == 10
     assert len(llm.calls) == 10
+
+    cleanup(db_path)
     print("test_max_iterations_reached passed")
 
 
 async def test_malformed_tool_call_response():
     """LLM says type='tool_call' but forgets to include tool_call itself."""
+    store, db_path = fresh_store()
     llm = MockLLM(response=[
         LLMResponse(
             type="tool_call",
@@ -130,19 +156,22 @@ async def test_malformed_tool_call_response():
             tokens_used=10
         ),
     ])
-    agent = Agent(llm=llm, tools=ToolRegistry([]), max_iterations=10)
+    agent = Agent(llm=llm, tools=ToolRegistry([]), store=store, max_iterations=10)
 
-    result = await agent.run("Test malformed response")
+    result = await agent.start("Test malformed response")
 
     assert result.status == "completed"
     assert result.output == "Recovered."
     second_call_history = llm.calls[1]
     assert "missing" in second_call_history[-1].text.lower()
+
+    cleanup(db_path)
     print("test_malformed_tool_call_response passed")
 
 
 async def test_budget_exceeded():
     """LLM's token usage crosses max_tokens before finishing."""
+    store, db_path = fresh_store()
     llm = MockLLM(response=[
         LLMResponse(
             type="final",
@@ -150,14 +179,16 @@ async def test_budget_exceeded():
             tokens_used=9999
         )
     ])
-    agent = Agent(llm=llm, tools=ToolRegistry([]), max_iterations=10, max_tokens=1000)
+    agent = Agent(llm=llm, tools=ToolRegistry([]), store=store, max_iterations=10, max_tokens=1000)
 
-    result = await agent.run("Say something expensive")
+    result = await agent.start("Say something expensive")
 
     assert result.status == "budget_exceeded"
     assert result.output is None
     assert result.tokens_used == 9999
     assert result.iterations_used == 1
+
+    cleanup(db_path)
     print("test_budget_exceeded passed")
 
 
@@ -171,7 +202,7 @@ class FlakyTool(Tool):
     @property
     def name(self) -> str:
         return "flaky"
-    
+
     @property
     def description(self) -> str:
         return "A test tool that fails a configurable number of times before succeeding."
@@ -185,6 +216,7 @@ class FlakyTool(Tool):
 
 async def test_tool_retry_then_success():
     """Tool fails twice, succeeds on the 3rd (final allowed) attempt."""
+    store, db_path = fresh_store()
     flaky = FlakyTool(fail_times=2)
     llm = MockLLM(response=[
         LLMResponse(
@@ -199,20 +231,23 @@ async def test_tool_retry_then_success():
             tokens_used=10
         ),
     ])
-    agent = Agent(llm=llm, tools=ToolRegistry([flaky]), max_iterations=10, max_tool_retries=2)
+    agent = Agent(llm=llm, tools=ToolRegistry([flaky]), store=store, max_iterations=10, max_tool_retries=2)
 
-    result = await agent.run("Use the flaky tool")
+    result = await agent.start("Use the flaky tool")
 
     assert result.status == "completed"
-    assert flaky.attempts == 3  # 1 initial + 2 retries
+    assert flaky.attempts == 3
     second_call_history = llm.calls[1]
     assert "success" in second_call_history[-1].text
+
+    cleanup(db_path)
     print("test_tool_retry_then_success passed")
 
 
 async def test_tool_fails_all_retries():
     """Tool fails every attempt — error reported back, run does not crash."""
-    flaky = FlakyTool(fail_times=99)  # always fails
+    store, db_path = fresh_store()
+    flaky = FlakyTool(fail_times=99)
     llm = MockLLM(response=[
         LLMResponse(
             type="tool_call",
@@ -226,14 +261,16 @@ async def test_tool_fails_all_retries():
             tokens_used=10
         ),
     ])
-    agent = Agent(llm=llm, tools=ToolRegistry([flaky]), max_iterations=10, max_tool_retries=2)
+    agent = Agent(llm=llm, tools=ToolRegistry([flaky]), store=store, max_iterations=10, max_tool_retries=2)
 
-    result = await agent.run("Use the flaky tool")
+    result = await agent.start("Use the flaky tool")
 
-    assert result.status == "completed"  # run itself doesn't crash
-    assert flaky.attempts == 3  # 1 initial + 2 retries, then gives up
+    assert result.status == "completed"
+    assert flaky.attempts == 3
     second_call_history = llm.calls[1]
     assert "Error" in second_call_history[-1].text
+
+    cleanup(db_path)
     print("test_tool_fails_all_retries passed")
 
 
@@ -243,7 +280,7 @@ class HangingTool(Tool):
     @property
     def name(self) -> str:
         return "hanging"
-    
+
     @property
     def description(self) -> str:
         return "hanging tool"
@@ -255,6 +292,7 @@ class HangingTool(Tool):
 
 async def test_tool_timeout():
     """Tool hangs forever — timeout kicks in, error reported, run does not hang."""
+    store, db_path = fresh_store()
     hanging = HangingTool()
     llm = MockLLM(response=[
         LLMResponse(
@@ -272,17 +310,64 @@ async def test_tool_timeout():
     agent = Agent(
         llm=llm,
         tools=ToolRegistry([hanging]),
+        store=store,
         max_iterations=10,
-        tool_timeout_seconds=0.2,   # short timeout so the test runs fast
-        max_tool_retries=1,         # keep retries low so test doesn't take too long
+        tool_timeout_seconds=0.2,
+        max_tool_retries=1,
     )
 
-    result = await agent.run("Use the hanging tool")
+    result = await agent.start("Use the hanging tool")
 
     assert result.status == "completed"
     second_call_history = llm.calls[1]
     assert "timed out" in second_call_history[-1].text.lower()
+
+    cleanup(db_path)
     print("test_tool_timeout passed")
+
+
+# --- NEW: tests specific to persistence/resumability ---
+
+async def test_events_are_persisted():
+    """Every LLM response and tool result should show up as a stored event."""
+    store, db_path = fresh_store()
+    llm = MockLLM(response=[
+        LLMResponse(
+            type="tool_call",
+            content=Message(type="model", text="Calculating."),
+            tool_call=ToolCall(name="calculator", arguments={"expression": "2 + 2"}),
+            tokens_used=10
+        ),
+        LLMResponse(
+            type="final",
+            content=Message(type="model", text="It's 4."),
+            tokens_used=10
+        ),
+    ])
+    agent = Agent(llm=llm, tools=ToolRegistry([CalculatorTool()]), store=store)
+    result = await agent.start("What is 2 + 2?")
+
+    run_id = store.list_incomplete_runs()  # won't include this run since it's completed
+    # Fetch run_id properly: query all runs directly since start() doesn't return it
+    # (only RunResult is returned) — so grab it via a raw query instead.
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()
+    conn.close()
+    run_id = row[0]
+
+    events = store.get_events(run_id)
+    event_types = [e["event_type"] for e in events]
+
+    assert "run_created" in event_types
+    assert "llm_response" in event_types
+    assert "tool_call_attempt" in event_types
+    assert event_types.count("llm_response") == 2  # one per iteration
+
+    cleanup(db_path)
+    print("test_events_are_persisted passed")
+
+
 
 
 async def main():
@@ -295,6 +380,7 @@ async def main():
     await test_tool_retry_then_success()
     await test_tool_fails_all_retries()
     await test_tool_timeout()
+    await test_events_are_persisted()
     print("\nAll tests passed!")
 
 
