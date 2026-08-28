@@ -2,7 +2,6 @@ from abc import ABC, abstractmethod
 from pydantic import BaseModel
 from typing import Literal , Any , Dict
 
-
 class Message(BaseModel):
     type: Literal["user", "model", "system"]
     text: str
@@ -19,7 +18,7 @@ class LLMResponse(BaseModel):
     tool_call: ToolCall | None = None
     tokens_used: int = 0  #mock count 
 
-RunStatus = Literal["queued", "running","completed", "max_iterations_exceeded", "budget_exceeded"]
+RunStatus = Literal["queued", "running","completed", "max_iterations_exceeded", "budget_exceeded" ,  "failed"]
 
 class RunResult(BaseModel):
     status: RunStatus
@@ -38,7 +37,6 @@ class LLM(ABC):
     @abstractmethod
     async def generate(self, message: list[Message]) -> LLMResponse:
         pass
-
 
 class Tool(ABC):
 

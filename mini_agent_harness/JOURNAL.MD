@@ -1,5 +1,10 @@
 ## mini-agnent - harness
 
+
+
+ ## core decisions 
+ - lang: [python.311]
+ - virtual env package - [uv]
  
 - the workflow would be if a feature design how it would look in model (pydantic) end to end like what goes in comes out etc this makes it mutable 
 - design the feature dry run it , retry if logic gets stuck -> take help -> try again ->write test for it with edge cases i can think of that time 
@@ -110,7 +115,7 @@ valueerror
 
 ## updating agent loop 
 - require major updates here before status we were dependent on runtime memory for storing now , we require to update and maintain our memory with runtime 
-- start() to create a new run and _execute()
+- creating start() to create a new run and _execute()
 - resume() for runs that have already a status == "running" ignores others and resumes the run from last step 
 -  get_history() does three things populate history: list[message] calc tokens and stores no. of iterations done if tool call
 - excute: 
@@ -153,41 +158,17 @@ valueerror
 
 ## Publishing event store :
 - just a wrapper on event store that calls bus events  and event store together 
-- wraps existing calls such as append event and update_Event
+
+- wraps existing calls such as append_event and update_event with bus event
 
 ## run_manager
-
-- The main responsibility of RunManager is not to execute the agent's logic itself. Instead, it manages the lifecycle of runs: creating them, deciding when they can execute, starting the Agent, and recovering runs that were interrupted by a server crash.
+- this is orchestrator of whole agent this is where i connected all the dots 
+- it:  Create runs → put them into execution → limit how many run simultaneously → resume interrupted runs.
 
 ## concurrency 
+- to manage concurrency i used semaphores from asynchio had to look this online didnt know how this was done 
 
-- managed by semaphore in asynchio(used help to discover it ai, google)
-- mostly three agents can execute at three time defined by `max_concurrent = 3`-
+- 
 
-- Runs 4 and 5 aren't rejected. Their _execute() tasks are simply waiting for the semaphore to become available.
-When one running Agent finishes, the semaphore is released and another waiting run can enter.
-Therefore, the semaphore is effectively acting as the concurrency limit for the system.
 
-## main.py
-
-- fast api wrapper build over mostly event manager
-- on startup: finishes task that are already in running state 
-- post / run : create a run 
-- get / run/run_id: gets the details of the run 
--  get/run/run_id/stream : SSE endpoint suscribes the client to the SSE if queued or running state if already  finished just returns the log                     
-
-## e2e tests
-- `test_successful_run_completes` : Checks that a run can be created, executes in the background, eventually completes, produces output, and records events
-- `test_get_unknown_run_returns_404`:Checks that requesting a non-existent run correctly returns 404.
-- `test_stream_endpoint_returns_events`: Checks that the SSE endpoint works and clients can receive persisted/live run events.
-- `test_concurrency_cap_queues_extra_runs`: Checks that when more runs are submitted than the concurrency limit allows, the extra runs wait/queue and eventually execute.
-- `client fixture + wait_for_status`: Provides each test with a fresh temporary database and FastAPI app, and handles waiting for asynchronous runs to reach a final state.
-
-## kill_resume_test
-- `start_server()`: Starts a real Uvicorn server as a separate process using the test database, so the test can simulate an actual server crash.
-- `clean_db fixture`:Ensures every test starts with a fresh SQLite database and cleans it up afterward.
-- `Kill the first proces`: Creates a run, lets it start and persist events, then uses SIGKILL to simulate a sudden/crash-like process death.
-- `Start a second process`: Starts a completely fresh server using the same database, testing whether RunManager.
-resume_incomplete_runs() detects and resumes the unfinished run.
-
-- `Verify continuity` :Checks that the resumed run eventually completes, produces output, and still contains events from before the crash. This proves the system resumes from persisted state rather than starting from scratch.
+                                 
